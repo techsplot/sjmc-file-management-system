@@ -94,7 +94,7 @@ const authenticateToken = (req: express.Request, res: express.Response, next: ex
         return res.status(403).json({ message: 'Invalid or expired token' });
     }
 };
-import type { Gender, NewPersonalFile, NewFamilyFile, NewReferralFile, NewEmergencyFile } from '../types.js';
+import type { Gender, NewPersonalFile, NewFamilyFile, NewReferralFile, NewEmergencyFile } from './types/shared.js';
 
 const router = express.Router();
 

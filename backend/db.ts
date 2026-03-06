@@ -1,4 +1,3 @@
-import { addYears } from 'date-fns';
 import { Pool } from 'pg';
 import type {
     EmergencyFile,
@@ -9,12 +8,18 @@ import type {
     NewReferralFile,
     PersonalFile,
     ReferralFile
-} from '../types.js';
+} from './types/shared.js';
 
 let pool: Pool | null = null;
 let schemaInitPromise: Promise<void> | null = null;
 
 const DUPLICATE_RECORD_CODE = 'DUPLICATE_RECORD';
+
+const addYears = (date: Date, years: number) => {
+    const nextDate = new Date(date);
+    nextDate.setFullYear(nextDate.getFullYear() + years);
+    return nextDate;
+};
 
 const createDuplicateRecordError = (message: string) => {
     const error = new Error(message) as Error & { code: string };
