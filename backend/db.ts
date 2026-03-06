@@ -110,17 +110,22 @@ const getPool = () => {
     if (pool) {
         return pool;
     }
-    const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME } = process.env;
+    const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT, DB_SSL } = process.env;
     if (!DB_HOST || !DB_USER || !DB_NAME) {
         console.error("Database environment variables are not set. Please check your .env file.");
         throw new Error("Missing database configuration.");
     }
+
+    const parsedPort = DB_PORT ? Number(DB_PORT) : undefined;
+    const useSsl = DB_SSL === 'true';
 
     pool = mysql.createPool({
         host: DB_HOST,
         user: DB_USER,
         password: DB_PASSWORD,
         database: DB_NAME,
+        port: parsedPort,
+        ssl: useSsl ? { rejectUnauthorized: false } : undefined,
         waitForConnections: true,
         connectionLimit: 10,
         queueLimit: 0,
