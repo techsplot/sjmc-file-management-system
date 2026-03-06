@@ -1,0 +1,5 @@
+{
+  "name": "Copy of Solomon Jayden Medical Center File System",
+  "description": "A file registration system for Solomon Jayden Medical Center (SJMC) to manage personal, family,referral, and emergency files. It includes a dashboard, detailed file tables with search and filter functionalities, and options to add, view, and edit files.",
+  "requestFramePermissions": []
+}
