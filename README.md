@@ -132,6 +132,28 @@ Expected:
 
 If PostgreSQL is reachable, `/api/health` should return `dbConnected: true`.
 
+### 7) One-command smoke test
+
+With your app running (`npm run dev` from repo root), run:
+
+```bash
+npm run smoke
+```
+
+This checks:
+
+- backend health (`/api/health`)
+- login + token verification
+- personal files endpoint
+- frontend root page
+
+Optional overrides:
+
+- `SMOKE_API_BASE_URL`
+- `SMOKE_FRONTEND_URL`
+- `SMOKE_ADMIN_EMAIL`
+- `SMOKE_ADMIN_PASSWORD`
+
 ---
 
 ## Common Local Issues
