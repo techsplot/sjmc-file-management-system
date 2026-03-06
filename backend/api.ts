@@ -71,7 +71,7 @@ const isDuplicateRecordError = (error: unknown): error is { code: string; messag
     }
 
     const errorCode = (error as { code?: string }).code;
-    return errorCode === 'DUPLICATE_RECORD' || errorCode === 'ER_DUP_ENTRY';
+    return errorCode === 'DUPLICATE_RECORD' || errorCode === 'ER_DUP_ENTRY' || errorCode === '23505';
 };
 
 // Authentication middleware

@@ -1,138 +1,127 @@
-# Free + Reliable Deployment Guide
+# Deployment Guide (Free Tier)
 
-This project can be deployed cost-free with a reliable setup using:
+This guide deploys the app with:
 
-- Frontend: Cloudflare Pages (free)
-- Backend + MySQL: Oracle Cloud Always Free VM (free tier)
-- Domain + TLS: Cloudflare DNS + SSL (free)
+- Database: Supabase Postgres (or Neon Postgres)
+- Backend: Render Web Service
+- Frontend: Cloudflare Pages or Vercel
 
-## 1) Frontend (Cloudflare Pages)
+---
 
-1. Push repo to GitHub.
-2. In Cloudflare Pages, connect the repo.
-3. Build settings:
+## Architecture
+
+- Frontend calls backend via `VITE_API_BASE_URL`
+- Backend connects to Postgres using `DATABASE_URL`
+- Backend health endpoints:
+  - `/healthz` (process)
+  - `/api/health` (process + DB)
+
+---
+
+## 1) Create managed PostgreSQL
+
+### Supabase (recommended)
+
+1. Create a new Supabase project.
+2. Open project settings and copy the Postgres connection string.
+3. Keep SSL enabled (`sslmode=require` in URL or use `PGSSL=true` on backend).
+
+### Neon (alternative)
+
+1. Create a Neon project/database.
+2. Copy the connection string.
+3. Use SSL-enabled connection.
+
+---
+
+## 2) Deploy backend on Render
+
+1. Push your code to GitHub.
+2. In Render, create a **Web Service** from your repo.
+3. Configure:
+   - Root Directory: `backend`
+   - Build Command: `npm ci && npm run build`
+   - Start Command: `npm start`
+4. Add environment variables:
+
+```dotenv
+DATABASE_URL=<your_supabase_or_neon_connection_string>
+PGSSL=true
+PORT=3001
+JWT_SECRET=<strong-random-secret>
+ADMIN_EMAIL=<your-admin-email>
+ADMIN_PASSWORD=<strong-admin-password>
+```
+
+5. Deploy and wait for build/start to complete.
+
+### Verify backend after deploy
+
+- `https://<your-render-service>.onrender.com/healthz`
+- `https://<your-render-service>.onrender.com/api/health`
+
+`/api/health` should return `dbConnected: true`.
+
+---
+
+## 3) Deploy frontend
+
+### Option A: Cloudflare Pages
+
+1. Connect GitHub repo.
+2. Build settings:
    - Build command: `npm run build`
-   - Build output directory: `dist`
-4. Add environment variable:
-   - `VITE_API_BASE_URL=https://api.yourdomain.com`
+   - Output directory: `dist`
+3. Add env var:
 
-## 2) Backend + MySQL (Oracle Always Free VM)
-
-SSH into your VM and run:
-
-```bash
-sudo apt update && sudo apt upgrade -y
-sudo apt install -y nginx mysql-server
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-sudo npm i -g pm2
+```dotenv
+VITE_API_BASE_URL=https://<your-render-service>.onrender.com
 ```
 
-Clone app:
+4. Deploy.
 
-```bash
-sudo mkdir -p /var/www && cd /var/www
-sudo git clone <your-repo-url> file-record-sjmc
-cd file-record-sjmc/backend
-npm ci
-npm run build
+### Option B: Vercel
+
+1. Import repo.
+2. Framework preset: Vite.
+3. Add env var:
+
+```dotenv
+VITE_API_BASE_URL=https://<your-render-service>.onrender.com
 ```
 
-Create backend env:
+4. Deploy.
 
-```bash
-cp .env.example .env # if available; otherwise create manually
-```
+---
 
-Set values in `.env`:
+## 4) Post-deploy validation checklist
 
-- `DB_HOST=127.0.0.1`
-- `DB_USER=<your_user>`
-- `DB_PASSWORD=<your_password>`
-- `DB_NAME=sjmc`
-- `PORT=3001`
-- `JWT_SECRET=<long_random_value>`
+1. Open frontend URL.
+2. Login with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from backend env.
+3. Confirm dashboard loads.
+4. Test create/edit/delete for at least one file record.
+5. Confirm backend health endpoints are still green.
 
-Start API with PM2:
+---
 
-```bash
-pm2 start ecosystem.config.cjs
-pm2 save
-pm2 startup
-```
+## 5) Security checklist
 
-## 3) Nginx reverse proxy
+Before production usage:
 
-Create `/etc/nginx/sites-available/sjmc-api`:
+- Rotate `JWT_SECRET` and `ADMIN_PASSWORD` from local defaults.
+- Never commit `.env` files.
+- Keep `.env.example` files as templates only.
+- Limit who can access your backend dashboard/service settings.
 
-```nginx
-server {
-    listen 80;
-    server_name api.yourdomain.com;
+---
 
-    location / {
-        proxy_pass http://127.0.0.1:3001;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection 'upgrade';
-        proxy_set_header Host $host;
-        proxy_cache_bypass $http_upgrade;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
+## 6) Updating production
 
-Enable and reload:
+1. Push changes to `main`.
+2. Render and frontend host auto-redeploy (if auto-deploy is enabled).
+3. Recheck:
+   - frontend app
+   - `/healthz`
+   - `/api/health`
 
-```bash
-sudo ln -s /etc/nginx/sites-available/sjmc-api /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-```
-
-## 4) DNS + SSL (Cloudflare)
-
-- Add `A` record: `api` -> your VM public IP.
-- Set Cloudflare SSL mode to `Full` (or `Full (strict)` when cert is configured).
-- Optional: install Certbot on VM for end-to-end TLS.
-
-## 5) Reliability checks
-
-Health endpoints:
-
-- API process health: `GET /healthz`
-- API + DB readiness: `GET /api/health`
-
-Examples:
-
-```bash
-curl https://api.yourdomain.com/healthz
-curl https://api.yourdomain.com/api/health
-```
-
-## 6) Backups (important)
-
-Set nightly MySQL backup cron:
-
-```bash
-crontab -e
-```
-
-Add:
-
-```cron
-0 2 * * * /usr/bin/mysqldump -u <db_user> -p'<db_password>' sjmc > /var/backups/sjmc_$(date +\%F).sql
-```
-
-## 7) Update deployment safely
-
-```bash
-cd /var/www/file-record-sjmc
-git pull
-cd backend
-npm ci
-npm run build
-pm2 restart sjmc-backend
-```
-
-If anything fails, rollback to previous commit and restart PM2.
+If there is an issue, roll back to previous deployment from your hosting dashboard.

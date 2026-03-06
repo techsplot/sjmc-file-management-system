@@ -1,20 +1,14 @@
--- Enforce duplicate prevention at the database level for SJMC records.
--- Run this in phpMyAdmin (SQL tab) after selecting the sjmc database.
+-- Enforce duplicate prevention at the database level for PostgreSQL.
+-- Run this in psql or your PostgreSQL GUI (DBeaver/TablePlus/Supabase SQL editor).
 
-USE sjmc;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_personal_name_age_gender
+ON personal_files (name, age, gender);
 
--- Personal files: same person profile should not be inserted twice.
-ALTER TABLE personal_files
-ADD UNIQUE KEY uq_personal_name_age_gender (name, age, gender);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_family_head_membercount
+ON family_files (head_name, member_count);
 
--- Family files: same head name + member count combination should be unique.
-ALTER TABLE family_files
-ADD UNIQUE KEY uq_family_head_membercount (headName, memberCount);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_referral_name
+ON referral_files (referral_name);
 
--- Referral files: referral name should be unique.
-ALTER TABLE referral_files
-ADD UNIQUE KEY uq_referral_name (referralName);
-
--- Emergency files: same person profile should not be inserted twice.
-ALTER TABLE emergency_files
-ADD UNIQUE KEY uq_emergency_name_age_gender (name, age, gender);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_emergency_name_age_gender
+ON emergency_files (name, age, gender);

@@ -1,95 +1,19 @@
-import mysql from 'mysql2/promise';
-import type { PersonalFile, FamilyFile, ReferralFile, EmergencyFile, NewPersonalFile, NewFamilyFile, NewReferralFile, NewEmergencyFile } from '../types.js';
-// FIX: Changed date-fns import to use a named import for `addYears` to resolve "not callable" error.
 import { addYears } from 'date-fns';
+import { Pool } from 'pg';
+import type {
+    EmergencyFile,
+    FamilyFile,
+    NewEmergencyFile,
+    NewFamilyFile,
+    NewPersonalFile,
+    NewReferralFile,
+    PersonalFile,
+    ReferralFile
+} from '../types.js';
 
-// --- MYSQL DATABASE CONNECTION & SETUP ---
-// 1. Create a .env file in the `backend` directory.
-// 2. Add your MySQL connection details to the .env file:
-//    DB_HOST=your_host
-//    DB_USER=your_user
-//    DB_PASSWORD=your_password
-//    DB_NAME=sjmc
-// 3. Create the `sjmc` database in your MySQL server.
-// 4. Run the SQL commands below to create the necessary tables and seed data.
-// 5. Run `npm install` in the `backend` directory to install `mysql2`.
-/*
--- SQL SCHEMA FOR MYSQL
--- You can run this script in your MySQL client to set up the database.
+let pool: Pool | null = null;
+let schemaInitPromise: Promise<void> | null = null;
 
-CREATE DATABASE IF NOT EXISTS sjmc;
-USE sjmc;
-
--- Drop tables if they exist to start fresh
-DROP TABLE IF EXISTS emergency_files;
-DROP TABLE IF EXISTS referral_files;
-DROP TABLE IF EXISTS family_files;
-DROP TABLE IF EXISTS personal_files;
-
--- Table for Personal Files
-CREATE TABLE personal_files (
-    id VARCHAR(255) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    age INT NOT NULL,
-    gender ENUM('Male', 'Female', 'Other') NOT NULL,
-    registrationDate DATETIME NOT NULL,
-    expiryDate DATETIME NOT NULL,
-    UNIQUE KEY uq_personal_name_age_gender (name, age, gender)
-);
-
--- Table for Family Files
-CREATE TABLE family_files (
-    id VARCHAR(255) PRIMARY KEY,
-    headName VARCHAR(255) NOT NULL,
-    memberCount INT NOT NULL,
-    registrationDate DATETIME NOT NULL,
-    expiryDate DATETIME NOT NULL,
-    UNIQUE KEY uq_family_head_membercount (headName, memberCount)
-);
-
--- Table for Referral Files
-CREATE TABLE referral_files (
-    id VARCHAR(255) PRIMARY KEY,
-    referralName VARCHAR(255) NOT NULL,
-    patientCount INT NOT NULL,
-    registrationDate DATETIME NOT NULL,
-    expiryDate DATETIME NOT NULL,
-    UNIQUE KEY uq_referral_name (referralName)
-);
-
--- Table for Emergency Files (structure is identical to PersonalFile)
-CREATE TABLE emergency_files (
-    id VARCHAR(255) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    age INT NOT NULL,
-    gender ENUM('Male', 'Female', 'Other') NOT NULL,
-    registrationDate DATETIME NOT NULL,
-    expiryDate DATETIME NOT NULL,
-    UNIQUE KEY uq_emergency_name_age_gender (name, age, gender)
-);
-
--- Optional: Add some initial data for testing
-INSERT INTO personal_files (id, name, age, gender, registrationDate, expiryDate) VALUES
-('SJMC-1', 'John Doe', 34, 'Male', NOW() - INTERVAL 5 DAY, NOW() + INTERVAL 1 YEAR),
-('SJMC-2', 'Jane Smith', 28, 'Female', NOW() - INTERVAL 12 DAY, NOW() + INTERVAL 1 YEAR),
-('SJMC-3', 'Peter Jones', 52, 'Male', NOW() - INTERVAL 45 DAY, NOW() - INTERVAL 10 DAY),
-('SJMC-4', 'Mary Williams', 41, 'Female', NOW() - INTERVAL 2 DAY, NOW() + INTERVAL 1 YEAR);
-
-INSERT INTO family_files (id, headName, memberCount, registrationDate, expiryDate) VALUES
-('FAM-1', 'Michael Miller', 4, NOW() - INTERVAL 20 DAY, NOW() + INTERVAL 2 YEAR),
-('FAM-2', 'Jessica Wilson', 3, NOW() - INTERVAL 60 DAY, NOW() + INTERVAL 2 YEAR);
-
-INSERT INTO referral_files (id, referralName, patientCount, registrationDate, expiryDate) VALUES
-('REF-1', 'Dr. Anderson', 12, NOW() - INTERVAL 10 DAY, NOW() + INTERVAL 5 YEAR),
-('REF-2', 'General Hospital', 45, NOW() - INTERVAL 180 DAY, NOW() - INTERVAL 5 DAY);
-
-INSERT INTO emergency_files (id, name, age, gender, registrationDate, expiryDate) VALUES
-('EMG-1', 'Anonymous Patient 1', 45, 'Male', NOW() - INTERVAL 1 DAY, NOW() + INTERVAL 1 YEAR);
-
-*/
-
-
-let pool: mysql.Pool | null = null;
 const DUPLICATE_RECORD_CODE = 'DUPLICATE_RECORD';
 
 const createDuplicateRecordError = (message: string) => {
@@ -98,51 +22,204 @@ const createDuplicateRecordError = (message: string) => {
     return error;
 };
 
-const ensureNoDuplicate = async (query: string, values: Array<string | number>, message: string) => {
-    const [rows] = await getPool().query(query, values);
-    const records = rows as Array<{ id: string }>;
-    if (records.length > 0) {
-        throw createDuplicateRecordError(message);
-    }
+const parseBoolean = (value: string | undefined) => {
+    if (!value) return false;
+    const normalized = value.trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes';
 };
 
 const getPool = () => {
     if (pool) {
         return pool;
     }
-    const { DB_HOST, DB_USER, DB_PASSWORD, DB_NAME, DB_PORT, DB_SSL } = process.env;
-    if (!DB_HOST || !DB_USER || !DB_NAME) {
-        console.error("Database environment variables are not set. Please check your .env file.");
-        throw new Error("Missing database configuration.");
+
+    const { DATABASE_URL } = process.env;
+    const sslEnabled = parseBoolean(process.env.PGSSL ?? process.env.DB_SSL);
+
+    if (DATABASE_URL && DATABASE_URL.trim()) {
+        pool = new Pool({
+            connectionString: DATABASE_URL,
+            ssl: sslEnabled ? { rejectUnauthorized: false } : undefined
+        });
+        return pool;
     }
 
-    const parsedPort = DB_PORT ? Number(DB_PORT) : undefined;
-    const useSsl = DB_SSL === 'true';
+    const host = process.env.PGHOST ?? process.env.DB_HOST;
+    const user = process.env.PGUSER ?? process.env.DB_USER;
+    const password = process.env.PGPASSWORD ?? process.env.DB_PASSWORD;
+    const database = process.env.PGDATABASE ?? process.env.DB_NAME;
+    const portValue = process.env.PGPORT ?? process.env.DB_PORT;
 
-    pool = mysql.createPool({
-        host: DB_HOST,
-        user: DB_USER,
-        password: DB_PASSWORD,
-        database: DB_NAME,
-        port: parsedPort,
-        ssl: useSsl ? { rejectUnauthorized: false } : undefined,
-        waitForConnections: true,
-        connectionLimit: 10,
-        queueLimit: 0,
-        dateStrings: true, // Return DATETIME fields as strings to prevent timezone issues
+    if (!host || !user || !database) {
+        console.error('Database environment variables are not set.');
+        throw new Error('Missing PostgreSQL configuration.');
+    }
+
+    const parsedPort = portValue ? Number(portValue) : 5432;
+
+    pool = new Pool({
+        host,
+        user,
+        password,
+        database,
+        port: Number.isFinite(parsedPort) ? parsedPort : 5432,
+        ssl: sslEnabled ? { rejectUnauthorized: false } : undefined
     });
+
     return pool;
 };
 
-const toMySQLDateTime = (date: Date) => date.toISOString().slice(0, 19).replace('T', ' ');
+const initSchema = async () => {
+    const client = await getPool().connect();
+    try {
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS personal_files (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                age INTEGER NOT NULL,
+                gender TEXT NOT NULL CHECK (gender IN ('Male', 'Female', 'Other')),
+                registration_date TIMESTAMP NOT NULL,
+                expiry_date TIMESTAMP NOT NULL,
+                CONSTRAINT uq_personal_name_age_gender UNIQUE (name, age, gender)
+            );
 
-const createId = (prefix = 'SJMC') => `${prefix}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`;
+            CREATE TABLE IF NOT EXISTS family_files (
+                id TEXT PRIMARY KEY,
+                head_name TEXT NOT NULL,
+                member_count INTEGER NOT NULL,
+                registration_date TIMESTAMP NOT NULL,
+                expiry_date TIMESTAMP NOT NULL,
+                CONSTRAINT uq_family_head_membercount UNIQUE (head_name, member_count)
+            );
 
-// Real DB Operations using MySQL
+            CREATE TABLE IF NOT EXISTS referral_files (
+                id TEXT PRIMARY KEY,
+                referral_name TEXT NOT NULL,
+                patient_count INTEGER NOT NULL,
+                registration_date TIMESTAMP NOT NULL,
+                expiry_date TIMESTAMP NOT NULL,
+                CONSTRAINT uq_referral_name UNIQUE (referral_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS emergency_files (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                age INTEGER NOT NULL,
+                gender TEXT NOT NULL CHECK (gender IN ('Male', 'Female', 'Other')),
+                registration_date TIMESTAMP NOT NULL,
+                expiry_date TIMESTAMP NOT NULL,
+                CONSTRAINT uq_emergency_name_age_gender UNIQUE (name, age, gender)
+            );
+        `);
+    } finally {
+        client.release();
+    }
+};
+
+const ensureSchema = async () => {
+    if (!schemaInitPromise) {
+        schemaInitPromise = initSchema();
+    }
+    await schemaInitPromise;
+};
+
+const runQuery = async <T>(queryText: string, values: unknown[] = []): Promise<T[]> => {
+    await ensureSchema();
+    const result = await getPool().query(queryText, values);
+    return result.rows as T[];
+};
+
+const runCommand = async (queryText: string, values: unknown[] = []) => {
+    await ensureSchema();
+    return getPool().query(queryText, values);
+};
+
+const createId = (prefix = 'SJMC') => `${prefix}-${Math.random().toString(36).substring(2, 11).toUpperCase()}`;
+
+const toTimestamp = (date: Date) => date.toISOString();
+
+const normalizeDate = (value: string | Date): string => {
+    if (value instanceof Date) {
+        return value.toISOString();
+    }
+    return value;
+};
+
+const ensureNoDuplicate = async (queryText: string, values: Array<string | number>, message: string) => {
+    const rows = await runQuery<{ id: string }>(queryText, values);
+    if (rows.length > 0) {
+        throw createDuplicateRecordError(message);
+    }
+};
+
+const mapPersonal = (row: {
+    id: string;
+    name: string;
+    age: number;
+    gender: PersonalFile['gender'];
+    registration_date: string | Date;
+    expiry_date: string | Date;
+}): PersonalFile => ({
+    id: row.id,
+    name: row.name,
+    age: row.age,
+    gender: row.gender,
+    registrationDate: normalizeDate(row.registration_date),
+    expiryDate: normalizeDate(row.expiry_date)
+});
+
+const mapFamily = (row: {
+    id: string;
+    head_name: string;
+    member_count: number;
+    registration_date: string | Date;
+    expiry_date: string | Date;
+}): FamilyFile => ({
+    id: row.id,
+    headName: row.head_name,
+    memberCount: row.member_count,
+    registrationDate: normalizeDate(row.registration_date),
+    expiryDate: normalizeDate(row.expiry_date)
+});
+
+const mapReferral = (row: {
+    id: string;
+    referral_name: string;
+    patient_count: number;
+    registration_date: string | Date;
+    expiry_date: string | Date;
+}): ReferralFile => ({
+    id: row.id,
+    referralName: row.referral_name,
+    patientCount: row.patient_count,
+    registrationDate: normalizeDate(row.registration_date),
+    expiryDate: normalizeDate(row.expiry_date)
+});
+
+const toCount = (count: string | number) => {
+    if (typeof count === 'number') return count;
+    const parsed = Number.parseInt(count, 10);
+    return Number.isNaN(parsed) ? 0 : parsed;
+};
+
+const buildUpdate = (entries: Array<[string, unknown]>) => {
+    const setClause: string[] = [];
+    const values: unknown[] = [];
+
+    for (const [column, value] of entries) {
+        if (value !== undefined) {
+            values.push(value);
+            setClause.push(`${column} = $${values.length}`);
+        }
+    }
+
+    return { setClause, values };
+};
+
 export const db = {
     ping: async (): Promise<boolean> => {
         try {
-            await getPool().query('SELECT 1');
+            await runQuery('SELECT 1');
             return true;
         } catch {
             return false;
@@ -150,12 +227,19 @@ export const db = {
     },
     personal: {
         find: async (): Promise<PersonalFile[]> => {
-            const [rows] = await getPool().query('SELECT * FROM personal_files ORDER BY registrationDate DESC');
-            return rows as PersonalFile[];
+            const rows = await runQuery<{
+                id: string;
+                name: string;
+                age: number;
+                gender: PersonalFile['gender'];
+                registration_date: string | Date;
+                expiry_date: string | Date;
+            }>('SELECT id, name, age, gender, registration_date, expiry_date FROM personal_files ORDER BY registration_date DESC');
+            return rows.map(mapPersonal);
         },
         create: async (data: NewPersonalFile): Promise<PersonalFile> => {
             await ensureNoDuplicate(
-                'SELECT id FROM personal_files WHERE LOWER(name) = LOWER(?) AND age = ? AND gender = ? LIMIT 1',
+                'SELECT id FROM personal_files WHERE LOWER(name) = LOWER($1) AND age = $2 AND gender = $3 LIMIT 1',
                 [data.name, data.age, data.gender],
                 'A personal file with the same name, age, and gender already exists.'
             );
@@ -163,55 +247,77 @@ export const db = {
             const newFile: PersonalFile = {
                 ...data,
                 id: createId('SJMC'),
-                registrationDate: toMySQLDateTime(new Date()),
-                expiryDate: toMySQLDateTime(addYears(new Date(), 1)),
+                registrationDate: toTimestamp(new Date()),
+                expiryDate: toTimestamp(addYears(new Date(), 1))
             };
-            const sql = 'INSERT INTO personal_files (id, name, age, gender, registrationDate, expiryDate) VALUES (?, ?, ?, ?, ?, ?)';
-            await getPool().execute(sql, [newFile.id, newFile.name, newFile.age, newFile.gender, newFile.registrationDate, newFile.expiryDate]);
+
+            await runCommand(
+                'INSERT INTO personal_files (id, name, age, gender, registration_date, expiry_date) VALUES ($1, $2, $3, $4, $5, $6)',
+                [newFile.id, newFile.name, newFile.age, newFile.gender, newFile.registrationDate, newFile.expiryDate]
+            );
+
             return newFile;
         },
         update: async (id: string, data: Partial<NewPersonalFile>): Promise<PersonalFile | null> => {
-            console.log('Updating database with data:', data);
-            
-            // Build dynamic SQL query based on provided fields
-            const updates: string[] = [];
-            const values: any[] = [];
-            
-            if (data.name !== undefined) { updates.push('name = ?'); values.push(data.name); }
-            if (data.age !== undefined) { updates.push('age = ?'); values.push(data.age); }
-            if (data.gender !== undefined) { updates.push('gender = ?'); values.push(data.gender); }
-            if (data.registrationDate !== undefined) { updates.push('registrationDate = ?'); values.push(data.registrationDate); }
-            if (data.expiryDate !== undefined) { updates.push('expiryDate = ?'); values.push(data.expiryDate); }
-            
-            // Add id to values array
+            const { setClause, values } = buildUpdate([
+                ['name', data.name],
+                ['age', data.age],
+                ['gender', data.gender],
+                ['registration_date', data.registrationDate],
+                ['expiry_date', data.expiryDate]
+            ]);
+
+            if (setClause.length === 0) {
+                const rows = await runQuery<{
+                    id: string;
+                    name: string;
+                    age: number;
+                    gender: PersonalFile['gender'];
+                    registration_date: string | Date;
+                    expiry_date: string | Date;
+                }>('SELECT id, name, age, gender, registration_date, expiry_date FROM personal_files WHERE id = $1', [id]);
+                return rows[0] ? mapPersonal(rows[0]) : null;
+            }
+
             values.push(id);
-            
-            const sql = `UPDATE personal_files SET ${updates.join(', ')} WHERE id = ?`;
-            console.log('Executing SQL:', sql, 'with values:', values);
-            
-            const [result] = await getPool().execute(sql, values);
-            
-            if ((result as mysql.OkPacket).affectedRows === 0) return null;
-            
-            const [updatedRows] = await getPool().query('SELECT * FROM personal_files WHERE id = ?', [id]);
-            const updatedFile = (updatedRows as PersonalFile[])[0] || null;
-            console.log('Updated file:', updatedFile);
-            return updatedFile;
+
+            const result = await runCommand(
+                `UPDATE personal_files SET ${setClause.join(', ')} WHERE id = $${values.length}`,
+                values
+            );
+
+            if (result.rowCount === 0) return null;
+
+            const rows = await runQuery<{
+                id: string;
+                name: string;
+                age: number;
+                gender: PersonalFile['gender'];
+                registration_date: string | Date;
+                expiry_date: string | Date;
+            }>('SELECT id, name, age, gender, registration_date, expiry_date FROM personal_files WHERE id = $1', [id]);
+
+            return rows[0] ? mapPersonal(rows[0]) : null;
         },
         delete: async (id: string): Promise<{ success: boolean }> => {
-            const sql = 'DELETE FROM personal_files WHERE id = ?';
-            const [result] = await getPool().execute(sql, [id]);
-            return { success: (result as mysql.OkPacket).affectedRows > 0 };
-        },
+            const result = await runCommand('DELETE FROM personal_files WHERE id = $1', [id]);
+            return { success: (result.rowCount ?? 0) > 0 };
+        }
     },
     family: {
         find: async (): Promise<FamilyFile[]> => {
-            const [rows] = await getPool().query('SELECT * FROM family_files ORDER BY registrationDate DESC');
-            return rows as FamilyFile[];
+            const rows = await runQuery<{
+                id: string;
+                head_name: string;
+                member_count: number;
+                registration_date: string | Date;
+                expiry_date: string | Date;
+            }>('SELECT id, head_name, member_count, registration_date, expiry_date FROM family_files ORDER BY registration_date DESC');
+            return rows.map(mapFamily);
         },
         create: async (data: NewFamilyFile): Promise<FamilyFile> => {
             await ensureNoDuplicate(
-                'SELECT id FROM family_files WHERE LOWER(headName) = LOWER(?) AND memberCount = ? LIMIT 1',
+                'SELECT id FROM family_files WHERE LOWER(head_name) = LOWER($1) AND member_count = $2 LIMIT 1',
                 [data.headName, data.memberCount],
                 'A family file with the same head name and member count already exists.'
             );
@@ -219,48 +325,70 @@ export const db = {
             const newFile: FamilyFile = {
                 ...data,
                 id: createId('FAM'),
-                registrationDate: toMySQLDateTime(new Date()),
-                expiryDate: toMySQLDateTime(addYears(new Date(), 2)),
+                registrationDate: toTimestamp(new Date()),
+                expiryDate: toTimestamp(addYears(new Date(), 2))
             };
-            const sql = 'INSERT INTO family_files (id, headName, memberCount, registrationDate, expiryDate) VALUES (?, ?, ?, ?, ?)';
-            await getPool().execute(sql, [newFile.id, newFile.headName, newFile.memberCount, newFile.registrationDate, newFile.expiryDate]);
+
+            await runCommand(
+                'INSERT INTO family_files (id, head_name, member_count, registration_date, expiry_date) VALUES ($1, $2, $3, $4, $5)',
+                [newFile.id, newFile.headName, newFile.memberCount, newFile.registrationDate, newFile.expiryDate]
+            );
+
             return newFile;
         },
         update: async (id: string, data: Partial<NewFamilyFile>): Promise<FamilyFile | null> => {
-            // Build dynamic SQL query based on provided fields
-            const updates: string[] = [];
-            const values: any[] = [];
-            
-            if (data.headName !== undefined) { updates.push('headName = ?'); values.push(data.headName); }
-            if (data.memberCount !== undefined) { updates.push('memberCount = ?'); values.push(data.memberCount); }
-            if (data.registrationDate !== undefined) { updates.push('registrationDate = ?'); values.push(data.registrationDate); }
-            if (data.expiryDate !== undefined) { updates.push('expiryDate = ?'); values.push(data.expiryDate); }
-            
-            // Add id to values array
+            const { setClause, values } = buildUpdate([
+                ['head_name', data.headName],
+                ['member_count', data.memberCount],
+                ['registration_date', data.registrationDate],
+                ['expiry_date', data.expiryDate]
+            ]);
+
+            if (setClause.length === 0) {
+                const rows = await runQuery<{
+                    id: string;
+                    head_name: string;
+                    member_count: number;
+                    registration_date: string | Date;
+                    expiry_date: string | Date;
+                }>('SELECT id, head_name, member_count, registration_date, expiry_date FROM family_files WHERE id = $1', [id]);
+                return rows[0] ? mapFamily(rows[0]) : null;
+            }
+
             values.push(id);
-            
-            const sql = `UPDATE family_files SET ${updates.join(', ')} WHERE id = ?`;
-            console.log('Executing SQL:', sql, 'with values:', values);
-            
-            const [result] = await getPool().execute(sql, values);
-            if ((result as mysql.OkPacket).affectedRows === 0) return null;
-            
-            const [updatedRows] = await getPool().query('SELECT * FROM family_files WHERE id = ?', [id]);
-            return (updatedRows as FamilyFile[])[0] || null;
+
+            const result = await runCommand(`UPDATE family_files SET ${setClause.join(', ')} WHERE id = $${values.length}`, values);
+            if (result.rowCount === 0) return null;
+
+            const rows = await runQuery<{
+                id: string;
+                head_name: string;
+                member_count: number;
+                registration_date: string | Date;
+                expiry_date: string | Date;
+            }>('SELECT id, head_name, member_count, registration_date, expiry_date FROM family_files WHERE id = $1', [id]);
+
+            return rows[0] ? mapFamily(rows[0]) : null;
         },
         delete: async (id: string): Promise<{ success: boolean }> => {
-            const [result] = await getPool().execute('DELETE FROM family_files WHERE id = ?', [id]);
-            return { success: (result as mysql.OkPacket).affectedRows > 0 };
-        },
+            const result = await runCommand('DELETE FROM family_files WHERE id = $1', [id]);
+            return { success: (result.rowCount ?? 0) > 0 };
+        }
     },
     referral: {
         find: async (): Promise<ReferralFile[]> => {
-            const [rows] = await getPool().query('SELECT * FROM referral_files ORDER BY registrationDate DESC');
-            return rows as ReferralFile[];
+            const rows = await runQuery<{
+                id: string;
+                referral_name: string;
+                patient_count: number;
+                registration_date: string | Date;
+                expiry_date: string | Date;
+            }>('SELECT id, referral_name, patient_count, registration_date, expiry_date FROM referral_files ORDER BY registration_date DESC');
+            return rows.map(mapReferral);
         },
-         create: async (data: NewReferralFile): Promise<ReferralFile> => {
+        create: async (data: NewReferralFile): Promise<ReferralFile> => {
             await ensureNoDuplicate(
-                'SELECT id FROM referral_files WHERE LOWER(referralName) = LOWER(?) LIMIT 1',
+                'SELECT id FROM referral_files WHERE LOWER(referral_name) = LOWER($1) LIMIT 1',
                 [data.referralName],
                 'A referral file with the same referral name already exists.'
             );
@@ -268,48 +396,71 @@ export const db = {
             const newFile: ReferralFile = {
                 ...data,
                 id: createId('REF'),
-                registrationDate: toMySQLDateTime(new Date()),
-                expiryDate: toMySQLDateTime(addYears(new Date(), 5)),
+                registrationDate: toTimestamp(new Date()),
+                expiryDate: toTimestamp(addYears(new Date(), 5))
             };
-            const sql = 'INSERT INTO referral_files (id, referralName, patientCount, registrationDate, expiryDate) VALUES (?, ?, ?, ?, ?)';
-            await getPool().execute(sql, [newFile.id, newFile.referralName, newFile.patientCount, newFile.registrationDate, newFile.expiryDate]);
+
+            await runCommand(
+                'INSERT INTO referral_files (id, referral_name, patient_count, registration_date, expiry_date) VALUES ($1, $2, $3, $4, $5)',
+                [newFile.id, newFile.referralName, newFile.patientCount, newFile.registrationDate, newFile.expiryDate]
+            );
+
             return newFile;
         },
         update: async (id: string, data: Partial<NewReferralFile>): Promise<ReferralFile | null> => {
-            // Build dynamic SQL query based on provided fields
-            const updates: string[] = [];
-            const values: any[] = [];
-            
-            if (data.referralName !== undefined) { updates.push('referralName = ?'); values.push(data.referralName); }
-            if (data.patientCount !== undefined) { updates.push('patientCount = ?'); values.push(data.patientCount); }
-            if (data.registrationDate !== undefined) { updates.push('registrationDate = ?'); values.push(data.registrationDate); }
-            if (data.expiryDate !== undefined) { updates.push('expiryDate = ?'); values.push(data.expiryDate); }
-            
-            // Add id to values array
+            const { setClause, values } = buildUpdate([
+                ['referral_name', data.referralName],
+                ['patient_count', data.patientCount],
+                ['registration_date', data.registrationDate],
+                ['expiry_date', data.expiryDate]
+            ]);
+
+            if (setClause.length === 0) {
+                const rows = await runQuery<{
+                    id: string;
+                    referral_name: string;
+                    patient_count: number;
+                    registration_date: string | Date;
+                    expiry_date: string | Date;
+                }>('SELECT id, referral_name, patient_count, registration_date, expiry_date FROM referral_files WHERE id = $1', [id]);
+                return rows[0] ? mapReferral(rows[0]) : null;
+            }
+
             values.push(id);
-            
-            const sql = `UPDATE referral_files SET ${updates.join(', ')} WHERE id = ?`;
-            console.log('Executing SQL:', sql, 'with values:', values);
-            
-            const [result] = await getPool().execute(sql, values);
-            if ((result as mysql.OkPacket).affectedRows === 0) return null;
-            
-            const [updatedRows] = await getPool().query('SELECT * FROM referral_files WHERE id = ?', [id]);
-            return (updatedRows as ReferralFile[])[0] || null;
+
+            const result = await runCommand(`UPDATE referral_files SET ${setClause.join(', ')} WHERE id = $${values.length}`, values);
+            if (result.rowCount === 0) return null;
+
+            const rows = await runQuery<{
+                id: string;
+                referral_name: string;
+                patient_count: number;
+                registration_date: string | Date;
+                expiry_date: string | Date;
+            }>('SELECT id, referral_name, patient_count, registration_date, expiry_date FROM referral_files WHERE id = $1', [id]);
+
+            return rows[0] ? mapReferral(rows[0]) : null;
         },
         delete: async (id: string): Promise<{ success: boolean }> => {
-            const [result] = await getPool().execute('DELETE FROM referral_files WHERE id = ?', [id]);
-            return { success: (result as mysql.OkPacket).affectedRows > 0 };
-        },
+            const result = await runCommand('DELETE FROM referral_files WHERE id = $1', [id]);
+            return { success: (result.rowCount ?? 0) > 0 };
+        }
     },
     emergency: {
         find: async (): Promise<EmergencyFile[]> => {
-            const [rows] = await getPool().query('SELECT * FROM emergency_files ORDER BY registrationDate DESC');
-            return rows as EmergencyFile[];
+            const rows = await runQuery<{
+                id: string;
+                name: string;
+                age: number;
+                gender: EmergencyFile['gender'];
+                registration_date: string | Date;
+                expiry_date: string | Date;
+            }>('SELECT id, name, age, gender, registration_date, expiry_date FROM emergency_files ORDER BY registration_date DESC');
+            return rows.map(mapPersonal);
         },
         create: async (data: NewEmergencyFile): Promise<EmergencyFile> => {
             await ensureNoDuplicate(
-                'SELECT id FROM emergency_files WHERE LOWER(name) = LOWER(?) AND age = ? AND gender = ? LIMIT 1',
+                'SELECT id FROM emergency_files WHERE LOWER(name) = LOWER($1) AND age = $2 AND gender = $3 LIMIT 1',
                 [data.name, data.age, data.gender],
                 'An emergency file with the same name, age, and gender already exists.'
             );
@@ -317,80 +468,109 @@ export const db = {
             const newFile: EmergencyFile = {
                 ...data,
                 id: createId('EMG'),
-                registrationDate: toMySQLDateTime(new Date()),
-                expiryDate: toMySQLDateTime(addYears(new Date(), 1)),
+                registrationDate: toTimestamp(new Date()),
+                expiryDate: toTimestamp(addYears(new Date(), 1))
             };
-            const sql = 'INSERT INTO emergency_files (id, name, age, gender, registrationDate, expiryDate) VALUES (?, ?, ?, ?, ?, ?)';
-            await getPool().execute(sql, [newFile.id, newFile.name, newFile.age, newFile.gender, newFile.registrationDate, newFile.expiryDate]);
+
+            await runCommand(
+                'INSERT INTO emergency_files (id, name, age, gender, registration_date, expiry_date) VALUES ($1, $2, $3, $4, $5, $6)',
+                [newFile.id, newFile.name, newFile.age, newFile.gender, newFile.registrationDate, newFile.expiryDate]
+            );
+
             return newFile;
         },
         update: async (id: string, data: Partial<NewEmergencyFile>): Promise<EmergencyFile | null> => {
-            const sql = 'UPDATE emergency_files SET name = ?, age = ?, gender = ? WHERE id = ?';
-            const [result] = await getPool().execute(sql, [data.name, data.age, data.gender, id]);
-            if ((result as mysql.OkPacket).affectedRows === 0) return null;
-            const [updatedRows] = await getPool().query('SELECT * FROM emergency_files WHERE id = ?', [id]);
-            return (updatedRows as EmergencyFile[])[0] || null;
+            const { setClause, values } = buildUpdate([
+                ['name', data.name],
+                ['age', data.age],
+                ['gender', data.gender],
+                ['registration_date', data.registrationDate],
+                ['expiry_date', data.expiryDate]
+            ]);
+
+            if (setClause.length === 0) {
+                const rows = await runQuery<{
+                    id: string;
+                    name: string;
+                    age: number;
+                    gender: EmergencyFile['gender'];
+                    registration_date: string | Date;
+                    expiry_date: string | Date;
+                }>('SELECT id, name, age, gender, registration_date, expiry_date FROM emergency_files WHERE id = $1', [id]);
+                return rows[0] ? mapPersonal(rows[0]) : null;
+            }
+
+            values.push(id);
+
+            const result = await runCommand(`UPDATE emergency_files SET ${setClause.join(', ')} WHERE id = $${values.length}`, values);
+            if (result.rowCount === 0) return null;
+
+            const rows = await runQuery<{
+                id: string;
+                name: string;
+                age: number;
+                gender: EmergencyFile['gender'];
+                registration_date: string | Date;
+                expiry_date: string | Date;
+            }>('SELECT id, name, age, gender, registration_date, expiry_date FROM emergency_files WHERE id = $1', [id]);
+
+            return rows[0] ? mapPersonal(rows[0]) : null;
         },
         delete: async (id: string): Promise<{ success: boolean }> => {
-            const [result] = await getPool().execute('DELETE FROM emergency_files WHERE id = ?', [id]);
-            return { success: (result as mysql.OkPacket).affectedRows > 0 };
-        },
+            const result = await runCommand('DELETE FROM emergency_files WHERE id = $1', [id]);
+            return { success: (result.rowCount ?? 0) > 0 };
+        }
     },
     getStats: async () => {
-        const now = new Date();
-        const oneWeekAgo = new Date(now);
+        const nowIso = toTimestamp(new Date());
+        const oneWeekAgo = new Date();
         oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-        const oneWeekAgoStr = toMySQLDateTime(oneWeekAgo);
-        const nowStr = toMySQLDateTime(now);
+        const oneWeekAgoIso = toTimestamp(oneWeekAgo);
 
-        // Personal Files Stats
-        const [personalTotal] = await getPool().query('SELECT COUNT(*) as total FROM personal_files');
-        const [personalWeekly] = await getPool().query('SELECT COUNT(*) as weekly FROM personal_files WHERE registrationDate >= ?', [oneWeekAgoStr]);
-        const [personalExpired] = await getPool().query('SELECT COUNT(*) as expired FROM personal_files WHERE expiryDate < ?', [nowStr]);
-        const [personalActive] = await getPool().query('SELECT COUNT(*) as active FROM personal_files WHERE expiryDate >= ?', [nowStr]);
+        const [personalTotal] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM personal_files');
+        const [personalWeekly] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM personal_files WHERE registration_date >= $1', [oneWeekAgoIso]);
+        const [personalExpired] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM personal_files WHERE expiry_date < $1', [nowIso]);
+        const [personalActive] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM personal_files WHERE expiry_date >= $1', [nowIso]);
 
-        // Family Files Stats
-        const [familyTotal] = await getPool().query('SELECT COUNT(*) as total FROM family_files');
-        const [familyWeekly] = await getPool().query('SELECT COUNT(*) as weekly FROM family_files WHERE registrationDate >= ?', [oneWeekAgoStr]);
-        const [familyExpired] = await getPool().query('SELECT COUNT(*) as expired FROM family_files WHERE expiryDate < ?', [nowStr]);
-        const [familyActive] = await getPool().query('SELECT COUNT(*) as active FROM family_files WHERE expiryDate >= ?', [nowStr]);
-        
-        // Referral Files Stats
-        const [referralTotal] = await getPool().query('SELECT COUNT(*) as total FROM referral_files');
-        const [referralWeekly] = await getPool().query('SELECT COUNT(*) as weekly FROM referral_files WHERE registrationDate >= ?', [oneWeekAgoStr]);
-        const [referralExpired] = await getPool().query('SELECT COUNT(*) as expired FROM referral_files WHERE expiryDate < ?', [nowStr]);
-        const [referralActive] = await getPool().query('SELECT COUNT(*) as active FROM referral_files WHERE expiryDate >= ?', [nowStr]);
+        const [familyTotal] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM family_files');
+        const [familyWeekly] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM family_files WHERE registration_date >= $1', [oneWeekAgoIso]);
+        const [familyExpired] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM family_files WHERE expiry_date < $1', [nowIso]);
+        const [familyActive] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM family_files WHERE expiry_date >= $1', [nowIso]);
 
-        // Emergency Files Stats
-        const [emergencyTotal] = await getPool().query('SELECT COUNT(*) as total FROM emergency_files');
-        const [emergencyWeekly] = await getPool().query('SELECT COUNT(*) as weekly FROM emergency_files WHERE registrationDate >= ?', [oneWeekAgoStr]);
-        const [emergencyExpired] = await getPool().query('SELECT COUNT(*) as expired FROM emergency_files WHERE expiryDate < ?', [nowStr]);
-        const [emergencyActive] = await getPool().query('SELECT COUNT(*) as active FROM emergency_files WHERE expiryDate >= ?', [nowStr]);
+        const [referralTotal] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM referral_files');
+        const [referralWeekly] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM referral_files WHERE registration_date >= $1', [oneWeekAgoIso]);
+        const [referralExpired] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM referral_files WHERE expiry_date < $1', [nowIso]);
+        const [referralActive] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM referral_files WHERE expiry_date >= $1', [nowIso]);
+
+        const [emergencyTotal] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM emergency_files');
+        const [emergencyWeekly] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM emergency_files WHERE registration_date >= $1', [oneWeekAgoIso]);
+        const [emergencyExpired] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM emergency_files WHERE expiry_date < $1', [nowIso]);
+        const [emergencyActive] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM emergency_files WHERE expiry_date >= $1', [nowIso]);
 
         return {
-            personal: { 
-                total: (personalTotal as any)[0].total, 
-                weekly: (personalWeekly as any)[0].weekly,
-                expired: (personalExpired as any)[0].expired,
-                active: (personalActive as any)[0].active
+            personal: {
+                total: toCount(personalTotal?.count ?? 0),
+                weekly: toCount(personalWeekly?.count ?? 0),
+                expired: toCount(personalExpired?.count ?? 0),
+                active: toCount(personalActive?.count ?? 0)
             },
-            family: { 
-                total: (familyTotal as any)[0].total, 
-                weekly: (familyWeekly as any)[0].weekly,
-                expired: (familyExpired as any)[0].expired,
-                active: (familyActive as any)[0].active
+            family: {
+                total: toCount(familyTotal?.count ?? 0),
+                weekly: toCount(familyWeekly?.count ?? 0),
+                expired: toCount(familyExpired?.count ?? 0),
+                active: toCount(familyActive?.count ?? 0)
             },
-            referral: { 
-                total: (referralTotal as any)[0].total, 
-                weekly: (referralWeekly as any)[0].weekly,
-                expired: (referralExpired as any)[0].expired,
-                active: (referralActive as any)[0].active
+            referral: {
+                total: toCount(referralTotal?.count ?? 0),
+                weekly: toCount(referralWeekly?.count ?? 0),
+                expired: toCount(referralExpired?.count ?? 0),
+                active: toCount(referralActive?.count ?? 0)
             },
-            emergency: { 
-                total: (emergencyTotal as any)[0].total, 
-                weekly: (emergencyWeekly as any)[0].weekly,
-                expired: (emergencyExpired as any)[0].expired,
-                active: (emergencyActive as any)[0].active
+            emergency: {
+                total: toCount(emergencyTotal?.count ?? 0),
+                weekly: toCount(emergencyWeekly?.count ?? 0),
+                expired: toCount(emergencyExpired?.count ?? 0),
+                active: toCount(emergencyActive?.count ?? 0)
             }
         };
     }
