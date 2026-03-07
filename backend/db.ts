@@ -207,6 +207,13 @@ const toCount = (count: string | number) => {
     return Number.isNaN(parsed) ? 0 : parsed;
 };
 
+type AggregateCountsRow = {
+    total: string | number;
+    weekly: string | number;
+    expired: string | number;
+    active: string | number;
+};
+
 const buildUpdate = (entries: Array<[string, unknown]>) => {
     const setClause: string[] = [];
     const values: unknown[] = [];
@@ -532,50 +539,48 @@ export const db = {
         oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
         const oneWeekAgoIso = toTimestamp(oneWeekAgo);
 
-        const [personalTotal] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM personal_files');
-        const [personalWeekly] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM personal_files WHERE registration_date >= $1', [oneWeekAgoIso]);
-        const [personalExpired] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM personal_files WHERE expiry_date < $1', [nowIso]);
-        const [personalActive] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM personal_files WHERE expiry_date >= $1', [nowIso]);
+        const aggregateQuery = (tableName: 'personal_files' | 'family_files' | 'referral_files' | 'emergency_files') =>
+            runQuery<AggregateCountsRow>(
+                `SELECT
+                    COUNT(*)::int AS total,
+                    COUNT(*) FILTER (WHERE registration_date >= $1)::int AS weekly,
+                    COUNT(*) FILTER (WHERE expiry_date < $2)::int AS expired,
+                    COUNT(*) FILTER (WHERE expiry_date >= $2)::int AS active
+                 FROM ${tableName}`,
+                [oneWeekAgoIso, nowIso]
+            );
 
-        const [familyTotal] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM family_files');
-        const [familyWeekly] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM family_files WHERE registration_date >= $1', [oneWeekAgoIso]);
-        const [familyExpired] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM family_files WHERE expiry_date < $1', [nowIso]);
-        const [familyActive] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM family_files WHERE expiry_date >= $1', [nowIso]);
-
-        const [referralTotal] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM referral_files');
-        const [referralWeekly] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM referral_files WHERE registration_date >= $1', [oneWeekAgoIso]);
-        const [referralExpired] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM referral_files WHERE expiry_date < $1', [nowIso]);
-        const [referralActive] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM referral_files WHERE expiry_date >= $1', [nowIso]);
-
-        const [emergencyTotal] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM emergency_files');
-        const [emergencyWeekly] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM emergency_files WHERE registration_date >= $1', [oneWeekAgoIso]);
-        const [emergencyExpired] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM emergency_files WHERE expiry_date < $1', [nowIso]);
-        const [emergencyActive] = await runQuery<{ count: string | number }>('SELECT COUNT(*)::int AS count FROM emergency_files WHERE expiry_date >= $1', [nowIso]);
+        const [[personal], [family], [referral], [emergency]] = await Promise.all([
+            aggregateQuery('personal_files'),
+            aggregateQuery('family_files'),
+            aggregateQuery('referral_files'),
+            aggregateQuery('emergency_files')
+        ]);
 
         return {
             personal: {
-                total: toCount(personalTotal?.count ?? 0),
-                weekly: toCount(personalWeekly?.count ?? 0),
-                expired: toCount(personalExpired?.count ?? 0),
-                active: toCount(personalActive?.count ?? 0)
+                total: toCount(personal?.total ?? 0),
+                weekly: toCount(personal?.weekly ?? 0),
+                expired: toCount(personal?.expired ?? 0),
+                active: toCount(personal?.active ?? 0)
             },
             family: {
-                total: toCount(familyTotal?.count ?? 0),
-                weekly: toCount(familyWeekly?.count ?? 0),
-                expired: toCount(familyExpired?.count ?? 0),
-                active: toCount(familyActive?.count ?? 0)
+                total: toCount(family?.total ?? 0),
+                weekly: toCount(family?.weekly ?? 0),
+                expired: toCount(family?.expired ?? 0),
+                active: toCount(family?.active ?? 0)
             },
             referral: {
-                total: toCount(referralTotal?.count ?? 0),
-                weekly: toCount(referralWeekly?.count ?? 0),
-                expired: toCount(referralExpired?.count ?? 0),
-                active: toCount(referralActive?.count ?? 0)
+                total: toCount(referral?.total ?? 0),
+                weekly: toCount(referral?.weekly ?? 0),
+                expired: toCount(referral?.expired ?? 0),
+                active: toCount(referral?.active ?? 0)
             },
             emergency: {
-                total: toCount(emergencyTotal?.count ?? 0),
-                weekly: toCount(emergencyWeekly?.count ?? 0),
-                expired: toCount(emergencyExpired?.count ?? 0),
-                active: toCount(emergencyActive?.count ?? 0)
+                total: toCount(emergency?.total ?? 0),
+                weekly: toCount(emergency?.weekly ?? 0),
+                expired: toCount(emergency?.expired ?? 0),
+                active: toCount(emergency?.active ?? 0)
             }
         };
     }
