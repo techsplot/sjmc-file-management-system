@@ -3,6 +3,7 @@ import 'dotenv/config';
 import express from 'express';
 import { db } from './db.js';
 import jwt from 'jsonwebtoken';
+import { createAppCache } from './cache.js';
 
 const getRequiredEnv = (key: 'JWT_SECRET' | 'ADMIN_EMAIL' | 'ADMIN_PASSWORD'): string => {
     const value = process.env[key];
@@ -17,6 +18,7 @@ const ADMIN_EMAIL = getRequiredEnv('ADMIN_EMAIL');
 const ADMIN_PASSWORD = getRequiredEnv('ADMIN_PASSWORD');
 const ALLOWED_GENDERS = ['Male', 'Female', 'Other'] as const;
 const API_CACHE_TTL_MS = Number(process.env.API_CACHE_TTL_MS ?? 15_000);
+const appCache = createAppCache();
 
 const CACHE_KEYS = {
     stats: 'stats',
@@ -26,48 +28,25 @@ const CACHE_KEYS = {
     emergency: 'emergency:list'
 } as const;
 
-type CacheEntry<T> = {
-    value: T;
-    expiresAt: number;
-};
-
-const responseCache = new Map<string, CacheEntry<unknown>>();
 const inFlightLoads = new Map<string, Promise<unknown>>();
 const cacheStats = {
     hits: 0,
     misses: 0
 };
-
-const readCache = <T>(key: string): T | null => {
-    const entry = responseCache.get(key);
-    if (!entry) {
-        return null;
-    }
-
-    if (entry.expiresAt <= Date.now()) {
-        responseCache.delete(key);
-        return null;
-    }
-
-    return entry.value as T;
-};
-
-const writeCache = <T>(key: string, value: T) => {
-    responseCache.set(key, {
-        value,
-        expiresAt: Date.now() + Math.max(API_CACHE_TTL_MS, 0)
-    });
-};
-
-const clearCacheKeys = (keys: string[]) => {
+const clearCacheKeys = async (keys: string[]) => {
     keys.forEach((key) => {
-        responseCache.delete(key);
         inFlightLoads.delete(key);
     });
+
+    try {
+        await appCache.del(keys);
+    } catch (error) {
+        console.error('[cache] Failed to invalidate cache keys:', error);
+    }
 };
 
 const getOrLoadCached = async <T>(key: string, loader: () => Promise<T>): Promise<{ value: T; cacheHit: boolean }> => {
-    const cached = readCache<T>(key);
+    const cached = await appCache.get<T>(key);
     if (cached !== null) {
         cacheStats.hits += 1;
         return { value: cached, cacheHit: true };
@@ -82,8 +61,12 @@ const getOrLoadCached = async <T>(key: string, loader: () => Promise<T>): Promis
     }
 
     const loadPromise = loader()
-        .then((value) => {
-            writeCache(key, value);
+        .then(async (value) => {
+            try {
+                await appCache.set(key, value, Math.max(API_CACHE_TTL_MS, 0));
+            } catch (error) {
+                console.error('[cache] Failed to write cache key:', error);
+            }
             return value;
         })
         .finally(() => {
@@ -225,8 +208,9 @@ router.get('/cache-metrics', authenticateToken, (_req, res) => {
     const hitRate = totalLookups === 0 ? 0 : Number((cacheStats.hits / totalLookups).toFixed(4));
 
     res.json({
+        backend: appCache.backend,
         ttlMs: Math.max(API_CACHE_TTL_MS, 0),
-        cacheEntries: responseCache.size,
+        cacheEntries: appCache.getEntryCount(),
         inFlightLoads: inFlightLoads.size,
         lookups: totalLookups,
         hits: cacheStats.hits,
@@ -274,7 +258,7 @@ router.post('/personal', async (req, res) => {
             registrationDate,
             expiryDate
         });
-        clearCacheKeys([CACHE_KEYS.personal, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.personal, CACHE_KEYS.stats]);
         res.status(201).json(newFile);
     } catch (error) {
         if (isDuplicateRecordError(error)) {
@@ -304,7 +288,7 @@ router.put('/personal/:id', async (req, res) => {
         });
 
         if (!updatedFile) return res.status(404).json({ message: 'File not found' });
-        clearCacheKeys([CACHE_KEYS.personal, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.personal, CACHE_KEYS.stats]);
         console.log('File updated successfully:', updatedFile);
         res.json(updatedFile);
     } catch (error) {
@@ -316,7 +300,7 @@ router.put('/personal/:id', async (req, res) => {
 router.delete('/personal/:id', async (req, res) => {
     try {
         await db.personal.delete(req.params.id);
-        clearCacheKeys([CACHE_KEYS.personal, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.personal, CACHE_KEYS.stats]);
         res.status(204).send();
     } catch (error) {
         console.error(`Error deleting personal file ${req.params.id}:`, error);
@@ -359,7 +343,7 @@ router.post('/family', async (req, res) => {
             registrationDate,
             expiryDate
         });
-        clearCacheKeys([CACHE_KEYS.family, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.family, CACHE_KEYS.stats]);
         res.status(201).json(newFile);
     } catch (error) {
         if (isDuplicateRecordError(error)) {
@@ -374,7 +358,7 @@ router.put('/family/:id', async (req, res) => {
     try {
         const updatedFile = await db.family.update(req.params.id, req.body);
         if (!updatedFile) return res.status(404).json({ message: 'File not found' });
-        clearCacheKeys([CACHE_KEYS.family, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.family, CACHE_KEYS.stats]);
         res.json(updatedFile);
     } catch (error) {
         console.error(`Error updating family file ${req.params.id}:`, error);
@@ -385,7 +369,7 @@ router.put('/family/:id', async (req, res) => {
 router.delete('/family/:id', async (req, res) => {
     try {
         await db.family.delete(req.params.id);
-        clearCacheKeys([CACHE_KEYS.family, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.family, CACHE_KEYS.stats]);
         res.status(204).send();
     } catch (error) {
         console.error(`Error deleting family file ${req.params.id}:`, error);
@@ -427,7 +411,7 @@ router.post('/referral', async (req, res) => {
             registrationDate,
             expiryDate
         });
-        clearCacheKeys([CACHE_KEYS.referral, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.referral, CACHE_KEYS.stats]);
         res.status(201).json(newFile);
     } catch (error) {
         if (isDuplicateRecordError(error)) {
@@ -442,7 +426,7 @@ router.put('/referral/:id', async (req, res) => {
     try {
         const updatedFile = await db.referral.update(req.params.id, req.body);
         if (!updatedFile) return res.status(404).json({ message: 'File not found' });
-        clearCacheKeys([CACHE_KEYS.referral, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.referral, CACHE_KEYS.stats]);
         res.json(updatedFile);
     } catch (error) {
         console.error(`Error updating referral file ${req.params.id}:`, error);
@@ -453,7 +437,7 @@ router.put('/referral/:id', async (req, res) => {
 router.delete('/referral/:id', async (req, res) => {
     try {
         await db.referral.delete(req.params.id);
-        clearCacheKeys([CACHE_KEYS.referral, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.referral, CACHE_KEYS.stats]);
         res.status(204).send();
     } catch (error) {
         console.error(`Error deleting referral file ${req.params.id}:`, error);
@@ -501,7 +485,7 @@ router.post('/emergency', async (req, res) => {
             registrationDate,
             expiryDate
         });
-        clearCacheKeys([CACHE_KEYS.emergency, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.emergency, CACHE_KEYS.stats]);
         res.status(201).json(newFile);
     } catch (error) {
         if (isDuplicateRecordError(error)) {
@@ -516,7 +500,7 @@ router.put('/emergency/:id', async (req, res) => {
     try {
         const updatedFile = await db.emergency.update(req.params.id, req.body);
         if (!updatedFile) return res.status(404).json({ message: 'File not found' });
-        clearCacheKeys([CACHE_KEYS.emergency, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.emergency, CACHE_KEYS.stats]);
         res.json(updatedFile);
     } catch (error) {
         console.error(`Error updating emergency file ${req.params.id}:`, error);
@@ -527,7 +511,7 @@ router.put('/emergency/:id', async (req, res) => {
 router.delete('/emergency/:id', async (req, res) => {
     try {
         await db.emergency.delete(req.params.id);
-        clearCacheKeys([CACHE_KEYS.emergency, CACHE_KEYS.stats]);
+        await clearCacheKeys([CACHE_KEYS.emergency, CACHE_KEYS.stats]);
         res.status(204).send();
     } catch (error) {
         console.error(`Error deleting emergency file ${req.params.id}:`, error);
